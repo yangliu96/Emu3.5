@@ -1,10 +1,13 @@
 import os
 import threading
 from typing import Any, Dict, Generator, List, Optional, Tuple
+import time
+from PIL import Image
 
 import torch
 
-from multi_turn_emu3p5 import MultiTurnEmu3Generator
+from src.utils.model_utils import build_emu3p5
+from src.utils.generation_utils import generate, multimodal_decode
 
 
 class ModelRuntime:
@@ -17,6 +20,10 @@ class ModelRuntime:
     """
 
     _singleton: Optional["ModelRuntime"] = None
+    _sampling_keys = [
+        "top_p", "top_k", "temperature", "num_beams", "max_new_tokens",
+        "min_new_tokens", "repetition_penalty", "do_sample", "steps"
+    ]
 
     @classmethod
     def instance(cls) -> "ModelRuntime":
@@ -25,17 +32,24 @@ class ModelRuntime:
         return cls._singleton
 
     def __init__(self) -> None:
-        self._generator: Optional[MultiTurnEmu3Generator] = None
-        self._cfg_module: Optional[Any] = None
+        self.model = None
+        self.tokenizer = None
+        self.vq_model = None
+        self.cfg_module: Optional[Any] = None
         self._device: Optional[torch.device] = None
         self._save_dir: Optional[str] = None
         self._stop_event = threading.Event()
+        self._main_cfg_path: Optional[str] = None
+        self._main_cfg_module: Optional[Any] = None
 
         # 显存/上下文保护参数（可由 cfg 覆盖）
-        self.context_limit_tokens: int = 8192  # 超过约 8k 可能爆显存
-        self.history_keep_last_steps: int = 6   # 保留最近 N 段（除第一条用户指令）
-        self.max_new_tokens_cap: int = 2048     # 单次生成上限
+        self.context_limit_tokens: int = 8192
+        self.history_keep_last_steps: int = 6
+        self.max_new_tokens_cap: int = 2048
         self.enable_cuda_empty_cache: bool = True
+
+        # 运行时历史
+        self.history: List = []
 
     # ---------- 基础 ----------
     def _load_cfg_module(self, cfg_path: str):
@@ -51,20 +65,22 @@ class ModelRuntime:
         return module
 
     def is_ready(self) -> bool:
-        return self._generator is not None
+        return self.model is not None
 
     def initialize(self, cfg_path: str, save_dir: str, device_str: Optional[str] = None, force_reload: bool = False) -> str:
         """
         - 若已有模型且非强制重载，直接复用
         - 否则按 cfg 重建
         """
-        if self._generator is not None and not force_reload:
+        if self.model is not None and not force_reload:
             return "✅ 模型已就绪（复用现有实例）"
 
         # 卸载旧模型
-        if self._generator is not None:
+        if self.model is not None:
             try:
-                self._generator = None
+                self.model = None
+                self.tokenizer = None
+                self.vq_model = None
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
             except Exception:
@@ -77,33 +93,105 @@ class ModelRuntime:
         else:
             device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 
-        generator = MultiTurnEmu3Generator(cfg=cfg, device=device)
+        # 构建模型
+        self.model, self.tokenizer, self.vq_model = build_emu3p5(
+            cfg.model_path,
+            cfg.tokenizer_path,
+            cfg.vq_path,
+            vq_type=getattr(cfg, "vq_type", None),
+            model_device=getattr(cfg, "hf_device", device),
+            vq_device=getattr(cfg, "vq_device", device),
+            **getattr(cfg, "diffusion_decoder_kwargs", {}),
+        )
 
         save_dir = os.path.abspath(save_dir)
         os.makedirs(save_dir, exist_ok=True)
 
-        # 接入显存保护的参数（若配置中存在则覆盖默认）
         self._apply_memory_cfg_overrides(cfg)
 
-        # 绑定
-        self._generator = generator
-        self._cfg_module = cfg
+        self.cfg_module = cfg
+        self._main_cfg_path = cfg_path
+        self._main_cfg_module = cfg
         self._device = device
         self._save_dir = save_dir
-
-        # 限制 max_new_tokens，避免过大
-        try:
-            max_cap = int(self.max_new_tokens_cap)
-            generator.generation_config.max_new_tokens = min(
-                int(generator.generation_config.max_new_tokens or max_cap), max_cap
-            )
-        except Exception:
-            pass
+        self.history = []
 
         return f"✅ 模型已加载到 {device}，输出目录：{save_dir}"
+    
+    def update_sampling_config(self, mode: str) -> None:
+        """
+        根据 mode 加载 configs/ 下的配置文件，仅更新采样参数，不重载模型。
+        """
+        config_map = {
+            "howto": "configs/example_config_visual_guidance.py",
+            "story": "configs/example_config_visual_narrative.py",
+            "t2i": "configs/example_config_t2i.py",
+            "x2i": "configs/example_config_x2i.py",
+            "default": "configs/config.py",
+        }
+        cfg_file = config_map.get(mode, "configs/config.py")
+        if not os.path.exists(cfg_file):
+            raise FileNotFoundError(f"配置文件 {cfg_file} 不存在！")
 
-    # ---------- 显存/上下文 ----------
+        cfg_module = self._load_cfg_module(cfg_file)
+
+        # 只更新采样参数
+        for key in self._sampling_keys:
+            if hasattr(cfg_module, key):
+                setattr(self.cfg_module, key, getattr(cfg_module, key))
+
+    def clear_history(self) -> None:
+        self.history = []
+
+    def request_stop(self) -> None:
+        self._stop_event.set()
+
+    def reset_stop(self) -> None:
+        self._stop_event.clear()
+
+    def encode_and_set_prompt(self, sample: Dict[str, Any]) -> None:
+        """
+        保存用户输入的文本和图片，并编码prompt。
+        """
+        self.clear_history()
+        seq = self.encode_prompt(sample)
+        self.history.append(seq)
+
+        # 保存用户输入和为本次会话创建目录
+        user_dir = os.path.join(self._save_dir, "sessions")
+        os.makedirs(user_dir, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        idx = len(os.listdir(user_dir))
+        session_dir = os.path.join(user_dir, f"session_{timestamp}_{idx:04d}")
+        os.makedirs(session_dir, exist_ok=True)
+        self._current_session_dir = session_dir  # 记录当前会话目录，供stream_events用
+
+        # 保存文本
+        text_prompt = sample.get("text_prompt", "")
+        with open(os.path.join(session_dir, "prompt.txt"), "w", encoding="utf-8") as f:
+            f.write(text_prompt)
+
+        # 保存图片
+        images = sample.get("images", [])
+        for i, img_path in enumerate(images):
+            try:
+                img = Image.open(img_path)
+                img.save(os.path.join(session_dir, f"image_{i:02d}.png"))
+            except Exception:
+                pass
+
+    def encode_prompt(self, sample: Dict[str, Any]):
+        # 你需要根据你的 pack_sample/sample 结构和 tokenizer 实现
+        # 这里只是一个简单示例
+        text_prompt = sample["text_prompt"]
+        input_ids = self.tokenizer.encode(text_prompt, return_tensors="pt").to(self.model.device)
+        return input_ids
+
+
     def _apply_memory_cfg_overrides(self, cfg_module: Any) -> None:
+        """
+        显存管理：根据配置文件动态调整显存相关参数。
+        """
         try:
             if hasattr(cfg_module, "context_limit_tokens"):
                 self.context_limit_tokens = int(cfg_module.context_limit_tokens)
@@ -118,189 +206,76 @@ class ModelRuntime:
 
     def _maybe_trim_history(self) -> None:
         """
-        保持 history 不超过 context_limit_tokens：
-        - 永远保留第一条用户输入（history[0]）
-        - 从第二条开始裁剪到最近 history_keep_last_steps 条
-        - 若仍超限，则进一步从第二条开始向后裁到满足 token 上限
+        裁剪历史记录，避免显存溢出。
         """
-        g = self._generator
-        if g is None or not g.history:
+        if not self.history:
             return
 
-        # 先做基于步数的截断
-        if len(g.history) - 1 > self.history_keep_last_steps:
-            g.history = g.history[:1] + g.history[-self.history_keep_last_steps :]
+        # 保留最近的历史记录
+        if len(self.history) > self.history_keep_last_steps:
+            self.history = self.history[-self.history_keep_last_steps:]
 
-        # 再做基于 token 的精细截断
-        total = g.get_history_length()
-        if total <= self.context_limit_tokens:
-            return
-
-        # 保留第一条，向后丢弃直到满足上限
-        kept = [g.history[0]]
-        for seq in reversed(g.history[1:]):
-            kept.insert(1, seq)
-            # 重新计算
-            tmp_len = sum(len(s) for s in kept)
-            if tmp_len > self.context_limit_tokens:
-                kept.pop(1)
-                break
-        g.history = kept
-
-    # ---------- 控制 ----------
-    def clear_history(self) -> None:
-        if self._generator is not None:
-            self._generator.reset_history()
-
-    def request_stop(self) -> None:
-        self._stop_event.set()
-
-    def reset_stop(self) -> None:
-        self._stop_event.clear()
-
-    # ---------- 生成流 ----------
-    def encode_and_set_prompt(self, sample: Dict[str, Any]) -> None:
-        assert self._generator is not None
-        self._generator.reset_history()
-        seq = self._generator.encode_prompt(sample)
-        self._generator.append_to_history(seq)
+        # 根据 token 限制进一步裁剪
+        total_tokens = sum(len(seq) for seq in self.history)
+        while total_tokens > self.context_limit_tokens and len(self.history) > 1:
+            self.history.pop(0)
+            total_tokens = sum(len(seq) for seq in self.history)
 
     def stream_events(self, max_rounds: int = 32, text_chunk_tokens: int = 64) -> Generator[Dict[str, Any], None, None]:
         """
-        真正的流式：
-        - 文本：按小块 token 流式产出（T 段），每小块立即 yield {type: "text", text: chunk}
-        - 图片：检测到进入图片段后（I 段）一次性生成完该图并 yield {type: "image", paths: [...]}。
-        - 可随时 request_stop()
+        流式生成：优化文本和图片的流式输出。
         """
-        assert self._generator is not None and self._cfg_module is not None and self._save_dir is not None
+        assert self.model is not None and self.tokenizer is not None and self.vq_model is not None and self.cfg_module is not None
 
-        import os.path as osp
+        # 获取 prompt
+        if not self.history or len(self.history) == 0:
+            raise RuntimeError("No prompt set. 请先调用 encode_and_set_prompt。")
+        input_ids = self.history[-1]
 
-        self._maybe_trim_history()
+        # 构造 unconditional_ids
+        unc_prompt = getattr(self.cfg_module, "unc_prompt", "")
+        unconditional_ids = self.tokenizer.encode(unc_prompt, return_tensors="pt", add_special_tokens=False).to(self.model.device)
 
-        # 为本轮生成建立 case 目录
-        base = osp.join(self._save_dir, "one_step_gen_samples")
-        os.makedirs(base, exist_ok=True)
-        existing = []
-        for name in os.listdir(base):
-            if name.startswith("case") and name[4:].isdigit():
-                existing.append(int(name[4:]))
-        next_id = max(existing) + 1 if existing else 1
-        gen_path = osp.join(base, f"case{next_id}")
-        os.makedirs(gen_path, exist_ok=True)
+        # full_unc_ids 可选
+        if hasattr(self.cfg_module, "img_unc_prompt"):
+            full_unc_ids = self.tokenizer.encode(self.cfg_module.img_unc_prompt, return_tensors="pt", add_special_tokens=False).to(self.model.device)
+        else:
+            full_unc_ids = None
 
-        gen = self._generator
-        image_start_id = gen.cfg.special_token_ids.image_start_token
+        cfg = self.cfg_module
+        force_same_image_size = True
 
-        # 保护原始 max_new_tokens，T 段用较小块做近似流式
-        original_max_new = int(getattr(gen.generation_config, "max_new_tokens", self.max_new_tokens_cap))
+        text_accum = ""
+        session_dir = getattr(self, "_current_session_dir", self._save_dir)
+        text_chunk_idx = 0
+        image_chunk_idx = 0
 
-        rounds = 0
-        while not self._stop_event.is_set() and rounds < max_rounds:
-            # 先进入 T 段：小块生成并流式发送
-            reached_image = False
-            t_accum = None  # 累积本步T段tokens，用于与I段拼接后再解码图片
-            while not self._stop_event.is_set():
-                gen.generation_config.max_new_tokens = min(int(text_chunk_tokens), int(self.max_new_tokens_cap))
-                outputs, stop_flag = gen.generate_one_step_0724(mode='T')
-
-                if outputs is None or len(outputs) == 0:
-                    break
-
-                # 是否触发了图像开始（输出中包含 image_start）
-                if (outputs == image_start_id).any():
-                    reached_image = True
-
-                # 直接对新增 tokens 解码（跳过特殊符号）
-                try:
-                    text_chunk = gen.tokenizer.decode(outputs, skip_special_tokens=False)
-                except Exception:
-                    text_chunk = ""
-                # text_chunk = (text_chunk or "").strip()
-                if text_chunk:
-                    yield {"type": "text", "text": text_chunk}
-
-                # 累积当前T段tokens
-                try:
-                    import numpy as np
-                    t_accum = outputs if t_accum is None else np.concatenate([t_accum, outputs])
-                except Exception:
-                    t_accum = outputs
-
-                if stop_flag:
-                    # 终止（eos）
-                    gen.generation_config.max_new_tokens = original_max_new
-                    return
-
-                if reached_image:
-                    break
-
-                if self.enable_cuda_empty_cache and torch.cuda.is_available():
-                    try:
-                        torch.cuda.empty_cache()
-                    except Exception:
-                        pass
-
-            # 如未进入图片，直接下一轮
-            if not reached_image:
-                rounds += 1
-                continue
-
-            # 进入 I 段：一次性把图片生成出来（注意：必须包含上一步的T段，否则图片解析会失衡）
+        for result_tokens in generate(cfg, self.model, self.tokenizer, input_ids, unconditional_ids, full_unc_ids, force_same_image_size):
             if self._stop_event.is_set():
                 break
-
-            # 给 I 段更大的上限，以保证一张图完整生成
-            gen.generation_config.max_new_tokens = int(self.max_new_tokens_cap)
-            outputs, stop_flag = gen.generate_one_step_0724(mode='I')
-            if outputs is not None and len(outputs) > 0:
-                # 规范化：确保序列恰好是 [text(without <image start>)] + [<image start> + image_tokens...]
-                import numpy as np
-                text_part = t_accum if t_accum is not None else np.array([], dtype=outputs.dtype)
-                # 去除 T 段内的所有 image_start，防止前置残留
-                text_part = text_part[text_part != image_start_id]
-                # I 段若不以 image_start 开头，则补齐
-                i_part = outputs
-                if i_part[0] != image_start_id:
-                    i_part = np.concatenate([np.array([image_start_id], dtype=outputs.dtype), i_part])
-                total_seq = np.concatenate([text_part, i_part])
-
-                result = gen.split_seq_by_image(total_seq)
-                # 优先按一步[text,image]对齐；若断言失败，回退到自动对齐
-                try:
-                    steps, step_imgs = gen.decode_generated_results(result, gen_path, step_idx=rounds)
-                except AssertionError:
-                    steps, step_imgs = gen.decode_generated_results(result, gen_path)
-                imgs_path = step_imgs[0] if step_imgs else []
-                imgs_path = [os.path.abspath(p) for p in imgs_path]
-                if imgs_path:
-                    yield {"type": "image", "paths": imgs_path}
-
-            if self.enable_cuda_empty_cache and torch.cuda.is_available():
-                try:
-                    torch.cuda.empty_cache()
-                except Exception:
-                    pass
-
-            if stop_flag:
-                gen.generation_config.max_new_tokens = original_max_new
-                return
-
-            rounds += 1
-
-        # 恢复上限
-        gen.generation_config.max_new_tokens = original_max_new
-
-    # ---------- 便捷读取 ----------
-    @property
-    def generator(self) -> MultiTurnEmu3Generator:
-        assert self._generator is not None
-        return self._generator
-
-    @property
-    def cfg(self) -> Any:
-        assert self._cfg_module is not None
-        return self._cfg_module
+            try:
+                result = self.tokenizer.decode(result_tokens, skip_special_tokens=False)
+                mm_out = multimodal_decode(result, self.tokenizer, self.vq_model)
+                for item in mm_out:
+                    if item[0] == "text":
+                        # 分块输出文本
+                        text_chunk = item[1][:text_chunk_tokens]
+                        yield {"type": "text", "text": text_chunk}
+                    elif item[0] == "image":
+                        # 输出图片
+                        img = item[1]
+                        img_path = os.path.join(session_dir, f"gen_image_{image_chunk_idx:03d}.png")
+                        img.save(img_path)
+                        yield {"type": "image", "paths": [img_path]}
+            except Exception as e:
+                yield {"type": "text", "text": f"[ERROR] {e}"}
+                break
+        # 输出剩余文本（如有）
+        if text_accum:
+            text_path = os.path.join(session_dir, f"gen_text_{text_chunk_idx:03d}.txt")
+            with open(text_path, "w", encoding="utf-8") as f:
+                f.write(text_accum)
+            yield {"type": "text", "text": text_accum}
 
     @property
     def save_dir(self) -> str:
