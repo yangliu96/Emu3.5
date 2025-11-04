@@ -4,6 +4,7 @@ import os
 from typing import List, Any
 from PIL import Image
 import re
+import argparse
 
 from model_runtime import ModelRuntime
 
@@ -153,5 +154,26 @@ with gr.Blocks(title="Model Text + Multi-Image") as demo:
                      inputs=[cfg_path_tb, save_dir_tb, device_tb],
                      outputs=ready_msg)
 
+# ---------------- 命令行参数支持 ----------------
+
 if __name__ == "__main__":
-    demo.launch()
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument("--port", type=int, default=None, help="Port for Gradio server")
+    parser.add_argument("--host", type=str, default=None, help="Host for Gradio server (e.g. 0.0.0.0)")
+    parser.add_argument("--cfg", type=str, default=None, help="Config path for model init (overrides UI)")
+    parser.add_argument("--save_dir", type=str, default=None, help="Output directory for generations")
+    parser.add_argument("--device", type=str, default=None, help="Device string, e.g. cuda:0 or cpu")
+    args, _ = parser.parse_known_args()
+
+    cfg_path = args.cfg or "configs/config.py"
+    save_dir = args.save_dir or "./outputs"
+    device_str = args.device or None
+
+    print(startup_initialize(cfg_path=cfg_path, save_dir=save_dir, device_str=device_str))
+
+    launch_kwargs = {}
+    if args.port is not None:
+        launch_kwargs["server_port"] = args.port
+    if args.host is not None:
+        launch_kwargs["server_name"] = args.host
+    demo.launch(**launch_kwargs)
