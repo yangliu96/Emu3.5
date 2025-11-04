@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 import os
 import threading
-from typing import Any, Dict, Generator, List, Optional, Tuple
 import time
+from typing import Any, Dict, Generator, List, Optional, Tuple
 from pathlib import Path
 from PIL import Image
 
@@ -19,11 +19,12 @@ class ModelRuntime:
     ✅ 初始化/热重载（不重启 App）
     ✅ 配置切换时，如 model_path/tokenizer_path/vq_path 不同 → 自动 reload 模型
     ✅ 清空历史/选择性裁剪历史（显存保护）
-    ✅ streaming 文本分块输出 + 图片 ready 即推送
+    ✅ Streaming 文本分块 + 图片 ready 即发送
     ✅ Stop 中断生成
     """
 
     _singleton: Optional["ModelRuntime"] = None
+
     _sampling_keys = [
         "top_p", "top_k", "temperature", "num_beams", "max_new_tokens",
         "min_new_tokens", "repetition_penalty", "do_sample", "steps"
@@ -52,13 +53,12 @@ class ModelRuntime:
         self.max_new_tokens_cap: int = 2048
         self.enable_cuda_empty_cache: bool = True
 
-        # 运行时上下文 / 历史 prompt trace
+        # history 保存 (input_ids, unconditional_ids)
         self.history: List = []
 
     # ---------- 动态载入 config ----------
     def _load_cfg_module(self, cfg_path: str):
         import importlib.util
-        from pathlib import Path
 
         cfg_path = os.path.abspath(cfg_path)
         spec = importlib.util.spec_from_file_location(Path(cfg_path).stem, cfg_path)
@@ -88,10 +88,9 @@ class ModelRuntime:
 
         cfg = self._load_cfg_module(cfg_path)
 
-        if device_str:
-            device = torch.device(device_str)
-        else:
-            device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+        device = torch.device(device_str) if device_str else (
+            torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+        )
 
         self.model, self.tokenizer, self.vq_model = build_emu3p5(
             cfg.model_path,
@@ -109,20 +108,14 @@ class ModelRuntime:
         self._apply_memory_cfg_overrides(cfg)
 
         self.cfg_module = cfg
-        self._main_cfg_path = cfg_path
         self._device = device
         self._save_dir = save_dir
         self.history = []
 
         return f"✅ 模型已加载到 {device}，输出目录：{save_dir}"
 
-    # ---------- 关键增强功能：判断是否需要重载模型 ----------
+    # ---------- 关键：采样参数 or 热重载 ----------
     def update_sampling_config(self, mode: str) -> None:
-        """
-        ✅ 如果 config 中模型权重（model_path / tokenizer_path / vq_path）与当前不一致，
-           自动初始化 model（热重载）
-        ⚡ 如果一致，仅更新 sampling 参数，不 reload 模型
-        """
         config_map = {
             "howto": "configs/example_config_visual_guidance.py",
             "story": "configs/example_config_visual_narrative.py",
@@ -154,7 +147,6 @@ class ModelRuntime:
             for key in self._sampling_keys:
                 if hasattr(new_cfg, key):
                     setattr(self.cfg_module, key, getattr(new_cfg, key))
-
             print(f"[sampling update] config changed ({cfg_file}), model reused")
 
     # ---------- 运行控制 ----------
@@ -170,9 +162,12 @@ class ModelRuntime:
     # ---------- Prompt 编码 ----------
     def encode_and_set_prompt(self, sample: Dict[str, Any]) -> None:
         self.clear_history()
-        seq = self.encode_prompt(sample)
-        self.history.append(seq)
+        input_ids, unconditional_ids = self.encode_prompt(sample)
 
+        # ✅ 保存二元组
+        self.history.append((input_ids, unconditional_ids))
+
+        # 下面保持原始记录逻辑
         user_dir = os.path.join(self._save_dir, "sessions")
         os.makedirs(user_dir, exist_ok=True)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -185,11 +180,9 @@ class ModelRuntime:
         with open(os.path.join(session_dir, "prompt.txt"), "w", encoding="utf-8") as f:
             f.write(text_prompt)
 
-        images = sample.get("images", [])
-        for i, img_path in enumerate(images):
+        for i, img_path in enumerate(sample.get("images", [])):
             try:
-                img = Image.open(img_path)
-                img.save(os.path.join(session_dir, f"image_{i:02d}.png"))
+                Image.open(img_path).save(os.path.join(session_dir, f"image_{i:02d}.png"))
             except:
                 pass
 
@@ -200,11 +193,10 @@ class ModelRuntime:
         cfg = self.cfg_module
         unc_prompt, template = cfg.build_unc_and_template(cfg.task_type, with_image=bool(images))
 
+        # 处理图片
         if images:
-            image_str = ""
-            for img_path in images:
-                img = Image.open(img_path).convert("RGB")
-                image_str += build_image(img, cfg, self.tokenizer, self.vq_model)
+            image_str = "".join(build_image(Image.open(p).convert("RGB"), cfg, self.tokenizer, self.vq_model)
+                                for p in images)
             prompt = template.format(question=text_prompt).replace("<|IMAGE|>", image_str)
             unc_prompt = unc_prompt.replace("<|IMAGE|>", image_str)
         else:
@@ -213,8 +205,14 @@ class ModelRuntime:
         input_ids = self.tokenizer.encode(prompt, return_tensors="pt", add_special_tokens=False).to(self.model.device)
         unconditional_ids = self.tokenizer.encode(unc_prompt, return_tensors="pt", add_special_tokens=False).to(self.model.device)
 
-        if input_ids[0, 0] != cfg.special_tokens["BOS"]:
-            BOS = torch.tensor([[cfg.special_tokens["BOS"]]], device=input_ids.device, dtype=input_ids.dtype)
+        # ✅ 修复 BOS（string → token id）
+        bos_token = cfg.special_tokens["BOS"]
+        bos_id = self.tokenizer.encode(bos_token, add_special_tokens=False)
+        if not bos_id:
+            raise RuntimeError(f"BOS token '{bos_token}' 未加入 tokenizer 词表。")
+        BOS = torch.tensor([bos_id], device=input_ids.device, dtype=input_ids.dtype)
+
+        if input_ids[0, 0].item() != bos_id[0]:
             input_ids = torch.cat([BOS, input_ids], dim=1)
 
         return input_ids, unconditional_ids
@@ -240,10 +238,14 @@ class ModelRuntime:
         if len(self.history) > self.history_keep_last_steps:
             self.history = self.history[-self.history_keep_last_steps:]
 
-        total_tokens = sum(len(seq) for seq in self.history)
+        def _tokens_in_item(item):
+            ids = item[0] if isinstance(item, (tuple, list)) else item
+            return ids.shape[-1] if hasattr(ids, "shape") and len(ids.shape) >= 2 else int(ids.numel())
+
+        total_tokens = sum(_tokens_in_item(x) for x in self.history)
         while total_tokens > self.context_limit_tokens and len(self.history) > 1:
             self.history.pop(0)
-            total_tokens = sum(len(seq) for seq in self.history)
+            total_tokens = sum(_tokens_in_item(x) for x in self.history)
 
     # ---------- Streaming 输出 ----------
     def stream_events(self, max_rounds: int = 32, text_chunk_tokens: int = 64) -> Generator[Dict[str, Any], None, None]:
@@ -251,15 +253,15 @@ class ModelRuntime:
 
         if not self.history:
             raise RuntimeError("No prompt set. 请先调用 encode_and_set_prompt。")
-        input_ids, _ = self.history[-1]
 
-        unc_prompt = getattr(self.cfg_module, "unc_prompt", "")
-        unconditional_ids = self.tokenizer.encode(unc_prompt, return_tensors="pt", add_special_tokens=False).to(self.model.device)
+        # ✅ 不再重建 unconditional prompt，直接使用 encode_prompt() 存的
+        input_ids, unconditional_ids = self.history[-1]
 
-        full_unc_ids = self.tokenizer.encode(self.cfg_module.img_unc_prompt, return_tensors="pt", add_special_tokens=False).to(self.model.device) \
-                        if hasattr(self.cfg_module, "img_unc_prompt") else None
+        full_unc_ids = (
+            self.tokenizer.encode(self.cfg_module.img_unc_prompt, return_tensors="pt", add_special_tokens=False).to(self.model.device)
+            if hasattr(self.cfg_module, "img_unc_prompt") else None
+        )
 
-        text_accum = ""
         session_dir = getattr(self, "_current_session_dir", self._save_dir)
         image_chunk_idx = 0
 
@@ -274,9 +276,7 @@ class ModelRuntime:
 
                 for item in mm_out:
                     if item[0] == "text":
-                        text_chunk = item[1][:text_chunk_tokens]
-                        yield {"type": "text", "text": text_chunk}
-
+                        yield {"type": "text", "text": item[1][:text_chunk_tokens]}
                     elif item[0] == "image":
                         img = item[1]
                         img_path = os.path.join(session_dir, f"gen_image_{image_chunk_idx:03d}.png")
