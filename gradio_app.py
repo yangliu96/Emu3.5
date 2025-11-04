@@ -74,34 +74,15 @@ def on_submit(text: str, files: List[Any], mode: str, history: List[gr.ChatMessa
     text = (text or "").strip()
     file_paths = [f.name for f in files] if files else []
 
-    # 切换 mode 时更新采样参数
-    _RUNTIME.update_sampling_config(mode)
-
-    # 左侧：用户输入的文本和图片
-    if text:
-        history.append(gr.ChatMessage(role="user", content=text))
-        yield history, gr.update(value=None), gr.update(value=None), history
-
-    for file_path in file_paths:
-        try:
-            img = Image.open(file_path).convert("RGB")
-            history.append(gr.ChatMessage(role="user", content=[file_path]))
-            yield history, gr.update(value=None), gr.update(value=None), history
-        except Exception:
-            pass
-
-    # 生成准备
-    _RUNTIME.reset_stop()
+    # 构造 raw_sample，包含文本和图片
     raw_sample = {"text": text, "images": file_paths, "mode": mode}
     _RUNTIME.encode_and_set_prompt(raw_sample)
 
     # 流式生成
     for ev in _RUNTIME.stream_events(max_rounds=64, text_chunk_tokens=64):
         if ev["type"] == "text":
-            chunks = _chunk_text_cn_en(ev["text"], max_len=80)
-            for chunk in chunks:
-                history.append(gr.ChatMessage(role="assistant", content=chunk))
-                yield history, gr.update(value=None), gr.update(value=None), history
+            history.append(gr.ChatMessage(role="assistant", content=ev["text"]))
+            yield history, gr.update(value=None), gr.update(value=None), history
         elif ev["type"] == "image":
             history.append(gr.ChatMessage(role="assistant", content=ev["paths"]))
             yield history, gr.update(value=None), gr.update(value=None), history
