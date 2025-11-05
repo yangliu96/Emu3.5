@@ -18,7 +18,7 @@ import torch
 
 from src.utils.input_utils import build_image
 from src.utils.model_utils import build_emu3p5
-from src.utils.generation_utils import generate, multimodal_decode
+from src.utils.generation_utils import generate, multimodal_decode   # ✅ 使用修正后的 generate()
 
 
 class ModelRuntime:
@@ -148,7 +148,6 @@ class ModelRuntime:
             except:
                 pass
 
-
     def encode_prompt(self, sample: Dict[str, Any]):
         cfg = self.cfg_module
         text_prompt = sample.get("text", "")
@@ -173,40 +172,47 @@ class ModelRuntime:
 
     # ---------------- Streaming：保存模型输出 text & image -----------------
     def stream_events(self, text_chunk_tokens: int = 64) -> Generator[Dict[str, Any], None, None]:
+        """
+        适配新版 generate():
+            streaming=False → return ndarray
+            streaming=True  → yield {"type": "..."}
+        """
         input_ids, unconditional_ids = self.history[-1]
         session_dir = getattr(self, "_current_session_dir", self._save_dir)
 
-        img_idx = 0
-        text_idx = 0
+        img_idx, text_idx = 0, 0
 
-        for result_tokens in generate(self.cfg_module, self.model, self.tokenizer,
-                                      input_ids, unconditional_ids, None, True):
-
-            result = self.tokenizer.decode(result_tokens, skip_special_tokens=False)
-            outs = multimodal_decode(result, self.tokenizer, self.vq_model)
-
-            for item in outs:
-                if item[0] == "text":
-                    txt = item[1][:text_chunk_tokens]
-                    yield {"type": "text", "text": txt}
-
-                    # ✅ 保存输出 text
-                    with open(os.path.join(session_dir, f"gen_text_{text_idx}.txt"),
-                              "w", encoding="utf-8") as f:
-                        f.write(txt)
-                    text_idx += 1
-
-                elif item[0] == "image":
-                    img = item[1]
-                    img_path = os.path.join(session_dir, f"gen_img_{img_idx}.png")
-                    img.save(img_path)
-                    img_idx += 1
-                    yield {"type": "image", "paths": [img_path]}
+        # ✅ generate() streaming=True 时 yield event dict
+        for ev in generate(self.cfg_module, self.model, self.tokenizer,
+                           input_ids, unconditional_ids, None, True):
 
             if self._stop_event.is_set():
                 yield {"type": "text", "text": "🛑 已停止生成"}
                 self.reset_stop()
                 break
 
+            # ---------------- Streaming 文本事件 ----------------
+            if ev["type"] == "text":
+                txt = ev["text"][:text_chunk_tokens]
+                yield {"type": "text", "text": txt}
+
+                with open(os.path.join(session_dir, f"gen_text_{text_idx}.txt"),
+                            "w", encoding="utf-8") as f:
+                    f.write(txt)
+                text_idx += 1
+
+            # ---------------- Streaming 图片事件 ----------------
+            elif ev["type"] == "image":
+                img_path = os.path.join(session_dir, f"gen_img_{img_idx}.png")
+                ev["image"].save(img_path)
+                img_idx += 1
+
+                yield {"type": "image", "paths": [img_path]}
+
+            # ---------------- 最终 token ids （保留原逻辑） ----------------
+            elif ev["type"] == "final_ids":
+                pass  # 不做 UI 显示，仅保留事件
+
     @property
-    def save_dir(self): return self._save_dir
+    def save_dir(self): 
+        return self._save_dir
