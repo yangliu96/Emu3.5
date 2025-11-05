@@ -36,14 +36,15 @@ def on_submit(text, files, mode, history):
     # 5) 消费流式事件
     for ev in _RUNTIME.stream_events(text_chunk_tokens=64):
         if ev["type"] == "text":
+            # 如果是文本，继续输出文本
             assistant_acc += ev["text"]
             history[-1] = (None, assistant_acc)
             yield history, "", None, history
 
         elif ev["type"] == "image":
-            # 若本轮有图片结果，则把最后一条替换为图片列表
-            # 也可以改成追加新一条图片消息：history.append((None, ev["paths"]))
-            history[-1] = (None, ev["paths"])
+            # 如果是图片，显示图片
+            img_paths = ev["paths"]
+            history.append((None, [gr.Image.update(value=img_path) for img_path in img_paths]))  # 在历史记录中添加图片
             yield history, "", None, history
 
 def clear_chat():
