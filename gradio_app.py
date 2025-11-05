@@ -48,17 +48,21 @@ def on_submit(text, files, mode, history):
     # 5) 消费流式事件
     for ev in _RUNTIME.stream_events(text_chunk_tokens=64):
         if ev["type"] == "text":
-            # 如果是文本，继续输出文本
+            # 如果是文本，继续拼接之前的文本
             assistant_acc += ev["text"]
             history[-1] = ("assistant", assistant_acc)
             yield history, "", None, history
 
         elif ev["type"] == "image":
-            # 如果是图片，显示图片
+            # 如果是图片，清空之前的文本，并开始新的文本生成
             for ip in ev.get("paths", []):
                 echoed = _dup_path(ip)  # 复制图片路径以避免重复
                 history.append(("assistant", [echoed]))  # 将图片路径作为内容添加到历史记录中
                 yield history, gr.update(value=None), gr.update(value=None), history
+            
+            assistant_acc = ""  # 清空文本
+            history.append(("assistant", assistant_acc))
+
 
 def clear_chat():
     # 清空后端状态 + 返回两个输出：chat, state
