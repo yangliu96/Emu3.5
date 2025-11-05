@@ -44,7 +44,8 @@ def on_submit(text, files, mode, history):
         elif ev["type"] == "image":
             # 如果是图片，显示图片
             img_paths = ev["paths"]
-            history.append((None, [gr.Image.update(value=img_path) for img_path in img_paths]))  # 在历史记录中添加图片
+            # 使用 gr.update() 来更新图片
+            history.append((None, [gr.update(value=img_path) for img_path in img_paths]))  # 在历史记录中添加图片
             yield history, "", None, history
 
 def clear_chat():
