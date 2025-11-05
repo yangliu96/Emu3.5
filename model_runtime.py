@@ -18,7 +18,7 @@ import torch
 
 from src.utils.input_utils import build_image
 from src.utils.model_utils import build_emu3p5
-from src.utils.generation_utils import generate, multimodal_decode   # ✅ 使用修正后的 generate()
+from src.utils.generation_utils_streaming import generate, multimodal_decode   # ✅ 使用修正后的 generate()
 
 
 class ModelRuntime:
@@ -93,6 +93,7 @@ class ModelRuntime:
         os.makedirs(save_dir, exist_ok=True)
 
         self.cfg_module = cfg
+        self.cfg_module.streaming = True
         self._device = device
         self._save_dir = save_dir
 
@@ -118,6 +119,7 @@ class ModelRuntime:
         for k, v in self.runtime_persist_cfg.items():
             setattr(self.cfg_module, k, v)
 
+        self.cfg_module.streaming = True
         print(f"[sampling updated] mode={mode}, model reused ✅")
 
 
@@ -160,10 +162,15 @@ class ModelRuntime:
                 build_image(Image.open(p).convert("RGB"), cfg, self.tokenizer, self.vq_model)
                 for p in images
             )
-            prompt = template.format(question=text_prompt).replace("<|IMAGE|>", image_str)
+            prompt = template.format(question=text_prompt)
+            print(f"prompt: {prompt}")
+            print(f"unc_prompt: {unc_prompt}")
+            prompt = prompt.replace("<|IMAGE|>", image_str)
             unc_prompt = unc_prompt.replace("<|IMAGE|>", image_str)
         else:
             prompt = template.format(question=text_prompt)
+            print(f"prompt: {prompt}")
+            print(f"unc_prompt: {unc_prompt}")
 
         return (
             self.tokenizer.encode(prompt, return_tensors="pt").to(self._device),

@@ -6,110 +6,99 @@ from model_runtime import ModelRuntime
 _RUNTIME = ModelRuntime.instance()
 
 CSS = """
-.chatbot .message.user {
-    background: #DCF8C6 !important;
-    color: #111;
-}
-.chatbot .message.assistant {
-    background: #E8EBFF !important;
-    color: #111;
-}
+.chatbot .message.user { background: #f0fff0 !important; }
+.chatbot .message.assistant { background: #eef2ff !important; }
 """
 
-def startup_initialize(cfg_path: str, save_dir: str, device_str: str = None):
+def startup_initialize(cfg_path: str, save_dir: str, device_str: str | None = None):
     return _RUNTIME.initialize(cfg_path=cfg_path, save_dir=save_dir, device_str=device_str)
 
-
 def on_submit(text, files, mode, history):
-    """点击 send"""
+    # 1) 更新采样配置
     _RUNTIME.update_sampling_config(mode)
+
+    # 2) 设置样本（文本+图片路径）
     sample = {"text": text, "images": [f.name for f in files] if files else []}
     _RUNTIME.encode_and_set_prompt(sample)
 
-    # ✅ UI 显示用户输入（文本 + 图片）
-    chat_entry = {"role": "user", "content": []}
-    if text:
-        chat_entry["content"].append({"type": "text", "text": text})
+    # 3) 先把“用户消息”塞进 Chatbot（tuple 格式）
     if files:
-        chat_entry["content"].append({"type": "image", "path": [f.name for f in files]})
+        history.append((text, [f.name for f in files]))
+    else:
+        history.append((text, None))
+    yield history, "", None, history  # 清空输入框/文件
 
-    history.append(chat_entry)
+    # 4) 占位一条 assistant 消息，后续 streaming 不断覆盖这条
+    assistant_acc = ""
+    history.append((None, assistant_acc))
+    yield history, "", None, history
 
-    yield history, "", None, history  # 清空输入框
-
-    assistant_msg = {"role": "assistant", "content": []}
-    history.append(assistant_msg)
-
-    # ✅ Streaming 处理 generate() 输出
-    for ev in _RUNTIME.stream_events(text_chunk_tokens=48):
-
+    # 5) 消费流式事件
+    for ev in _RUNTIME.stream_events(text_chunk_tokens=64):
         if ev["type"] == "text":
-            assistant_msg["content"].append({"type": "text", "text": ev["text"]})
-            history[-1] = assistant_msg
+            assistant_acc += ev["text"]
+            history[-1] = (None, assistant_acc)
             yield history, "", None, history
 
         elif ev["type"] == "image":
-            assistant_msg["content"].append({"type": "image", "path": ev["paths"]})
-            history[-1] = assistant_msg
+            # 若本轮有图片结果，则把最后一条替换为图片列表
+            # 也可以改成追加新一条图片消息：history.append((None, ev["paths"]))
+            history[-1] = (None, ev["paths"])
             yield history, "", None, history
 
-
 def clear_chat():
+    # 清空后端状态 + 返回两个输出：chat, state
     _RUNTIME.history.clear()
     return [], []
 
-
 def on_stop():
+    # 只发停止信号；前端通过绑定到 status 文本组件，立刻给出反馈
     _RUNTIME.request_stop()
-    return "🛑 正在停止..."
-
+    return "🛑 已发送停止信号（本轮生成将尽快结束显示）"
 
 def build_ui():
     with gr.Blocks(css=CSS) as demo:
-        gr.Markdown("# 🦄 Emu 3.5 (BAAI) Streaming Demo")
+        gr.Markdown("# 🦄 Emu 3.5 Streaming Demo")
 
         with gr.Row():
             with gr.Column(scale=2):
                 cfg = gr.Textbox(label="🧩 Config Path", value="configs/config.py")
-                save_dir = gr.Textbox(label="📁 Output Directory", value="./outputs")
-                device = gr.Textbox(label="⚙️ Device", value="cuda:0")
+                save_dir = gr.Textbox(label="📁 Output Dir", value="./outputs")
+                device = gr.Textbox(label="⚙️ Device", value="")
                 mode = gr.Dropdown(
                     label="Generation Mode",
                     choices=["default", "howto", "story", "t2i", "x2i"],
                     value="default"
                 )
                 init_btn = gr.Button("🚀 Load Model", variant="primary")
-                status = gr.Markdown("")
+                status = gr.Markdown("")  # ⬅️ 停止按钮把文案写到这里
 
             with gr.Column(scale=6):
-                chat = gr.Chatbot(
-                    label="Chat with Emu3.5",
-                    height=550,
-                    avatar_images=("assets/user.png", "assets/emu.png"),
-                    elem_classes="chatbot"
-                )
+                # ⚠️ 使用默认的 tuple 模式（不要设置 type="messages"）
+                chat = gr.Chatbot(label="Chat", height=540, elem_classes="chatbot")
                 state = gr.State([])
 
-                text = gr.Textbox(
-                    label="💬 Prompt",
-                    placeholder="Enter your prompt here...",
-                    lines=2
-                )
+                text = gr.Textbox(label="💬 Prompt", placeholder="Enter your prompt...", lines=2)
                 files = gr.Files(label="📷 Upload image(s)", file_count="multiple", type="filepath")
 
                 with gr.Row():
                     send = gr.Button("Send", variant="primary")
-                    stop = gr.Button("Stop", variant="secondary")
-                    clear = gr.Button("Clear", variant="secondary")
+                    stop = gr.Button("Stop")
+                    clear = gr.Button("Clear")
 
-        # 绑定回调
-        init_btn.click(startup_initialize, [cfg, save_dir, device], status)
+        # 绑定
+        init_btn.click(startup_initialize, [cfg, save_dir, device], [status])
+
+        # send -> (chat, text, files, state) 四个输出（对应 on_submit 的 yield）
         send.click(on_submit, [text, files, mode, state], [chat, text, files, state])
+
+        # stop -> 输出 status（所以 on_stop 必须 return 字符串）
         stop.click(on_stop, outputs=[status])
+
+        # clear -> 输出 chat 和 state 两个对象（所以 clear_chat 必须 return 两个值）
         clear.click(clear_chat, outputs=[chat, state])
 
     return demo
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -122,8 +111,8 @@ def main():
 
     print(startup_initialize(args.cfg, args.save_dir, args.device))
     ui = build_ui()
+    ui.queue()  # 建议开启队列，体验更稳定
     ui.launch(server_name=args.host, server_port=args.port)
-
 
 if __name__ == "__main__":
     main()
