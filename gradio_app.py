@@ -34,14 +34,14 @@ def on_submit(text, files, mode, history):
 
     # 3) 先把“用户消息”塞进 Chatbot（tuple 格式）
     if files:
-        history.append((text, [f.name for f in files]))
+        history.append(("user", text, [f.name for f in files]))  # 显示用户的文本和上传的文件
     else:
-        history.append((text, None))
+        history.append(("user", text, None))  # 如果没有文件，则只显示文本
     yield history, "", None, history  # 清空输入框/文件
 
     # 4) 占位一条 assistant 消息，后续 streaming 不断覆盖这条
     assistant_acc = ""
-    history.append((None, assistant_acc))
+    history.append(("assistant", assistant_acc, None))
     yield history, "", None, history
 
     # 5) 消费流式事件
@@ -49,18 +49,15 @@ def on_submit(text, files, mode, history):
         if ev["type"] == "text":
             # 如果是文本，继续输出文本
             assistant_acc += ev["text"]
-            history[-1] = (None, assistant_acc)
+            history[-1] = ("assistant", assistant_acc, None)
             yield history, "", None, history
 
         elif ev["type"] == "image":
             # 如果是图片，显示图片
-            # img_paths = ev["paths"]
-            # # 使用 gr.update() 来更新图片
-            # history.append((None, [gr.update(value=img_path) for img_path in img_paths]))  # 在历史记录中添加图片
-            # yield history, "", None, history
             for ip in ev.get("paths", []):
+                # 复制文件路径并创建新文件
                 echoed = _dup_path(ip)
-                history = history + [gr.ChatMessage(role="assistant", content=[echoed])]
+                history.append(("assistant", None, [echoed]))  # 将图片路径添加到消息中
                 yield history, gr.update(value=None), gr.update(value=None), history
 
 def clear_chat():
