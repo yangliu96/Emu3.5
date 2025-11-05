@@ -155,22 +155,27 @@ def streaming_generate(
 
     def _emit_clean_text(txt: str):
         """输出 Global COT / Step COT / 普通文本，并保持换行"""
-        # 查找并替换 Global COT
-        for m in list(_global_cot_re.finditer(txt)):
-            yield {"type": "text", "text": f"[Global COT] {m.group(1).strip()}\n"}
-        txt = _global_cot_re.sub("", txt)
 
-        # 查找并替换 Step COT
-        for m in list(_step_cot_re.finditer(txt)):
-            yield {"type": "text", "text": f"[Step COT] {m.group(1).strip()}\n"}
-        txt = _step_cot_re.sub("", txt)
+        for m in [txt]:
+            yield {"type": "text", "text": m}
 
-        # 去除特殊 token
-        clean_txt = _special_tok_re.sub("", txt).strip()
-        if clean_txt:
-            clean_txt = clean_txt.replace("<|newline|>", "\n")  # 保留换行符
-            yield {"type": "text", "text": clean_txt}
+        # # 查找并替换 Global COT
+        # for m in list(_global_cot_re.finditer(txt)):
+        #     yield {"type": "text", "text": f"[Global COT] {m.group(1).strip()}\n"}
+        # txt = _global_cot_re.sub("", txt)
 
+        # # 查找并替换 Step COT
+        # for m in list(_step_cot_re.finditer(txt)):
+        #     yield {"type": "text", "text": f"[Step COT] {m.group(1).strip()}\n"}
+        # txt = _step_cot_re.sub("", txt)
+
+        # # 去除特殊 token
+        # clean_txt = _special_tok_re.sub("", txt).strip()
+        # if clean_txt:
+        #     clean_txt = clean_txt.replace("<|newline|>", "\n")  # 保留换行符
+        #     yield {"type": "text", "text": clean_txt}
+
+    # import pdb; pdb.set_trace()
     # --- 主循环：逐片解析 ---
     for piece in streamer:
         if not piece:
@@ -188,10 +193,10 @@ def streaming_generate(
 
                     # 解码图片并输出
                     image_token_str = "".join(image_tokens)
-                    import pdb; pdb.set_trace()
+                    # import pdb; pdb.set_trace()
                     try:
-                        image = multimodal_decode(image_token_str, tokenizer, getattr(cfg, "vision_tokenizer", None))[0][1]
-                        yield {"type": "image", "image": image}
+                        # image = multimodal_decode(image_token_str, tokenizer, getattr(cfg, "vision_tokenizer", None))[0][1]
+                        yield {"type": "image", "image": image_token_str}
                     except Exception:
                         pass
                     image_tokens = []  # 重置图片 token 缓存
@@ -199,8 +204,8 @@ def streaming_generate(
                     continue
                 else:
                     # 图片 token 不完整，继续缓存
-                    image_buffer += buffer
-                    buffer = ""  # 清空当前 buffer，等待更多图片 token
+                    img_stable, buffer = buffer[:-256], buffer[-256:]  # 增加缓存大小
+                    image_buffer += img_stable
                     break
             else:
                 mstart = _img_start_re.search(buffer)
@@ -208,7 +213,9 @@ def streaming_generate(
                     pre = buffer[:mstart.start()]
                     for ev in _emit_clean_text(pre):
                         yield ev
-                    buffer = buffer[mstart.end():]
+                    
+                    # import pdb; pdb.set_trace()
+                    buffer = buffer[mstart.start():]
                     image_mode = True
                     continue
                 else:
@@ -224,26 +231,26 @@ def streaming_generate(
             yield ev
     buffer = ""
 
-    # --- 输出最终 tokens ---
-    tokens = out_holder.get("token_ids", None)
-    if tokens is None:
-        return
-    gen_token_ids = tokens[:, input_ids_len:]
-    gen_np = (
-        gen_token_ids[0].detach().cpu().numpy()
-        if isinstance(gen_token_ids, torch.Tensor)
-        else np.array(gen_token_ids[0], dtype=np.int64)
-    )
-    yield {"type": "final_ids", "ids": gen_np}
+    # # --- 输出最终 tokens ---
+    # tokens = out_holder.get("token_ids", None)
+    # if tokens is None:
+    #     return
+    # gen_token_ids = tokens[:, input_ids_len:]
+    # gen_np = (
+    #     gen_token_ids[0].detach().cpu().numpy()
+    #     if isinstance(gen_token_ids, torch.Tensor)
+    #     else np.array(gen_token_ids[0], dtype=np.int64)
+    # )
+    # yield {"type": "final_ids", "ids": gen_np}
 
-    # --- 解码图片 ---
-    try:
-        full_text = tokenizer.batch_decode(tokens, skip_special_tokens=False)[0]
-        for kind, payload in multimodal_decode(full_text, tokenizer, getattr(cfg, "vision_tokenizer", None)):
-            if kind == "image" and isinstance(payload, Image.Image):
-                yield {"type": "image", "image": payload}
-    except Exception:
-        pass
+    # # --- 解码图片 ---
+    # try:
+    #     full_text = tokenizer.batch_decode(tokens, skip_special_tokens=False)[0]
+    #     for kind, payload in multimodal_decode(full_text, tokenizer, getattr(cfg, "vision_tokenizer", None)):
+    #         if kind == "image" and isinstance(payload, Image.Image):
+    #             yield {"type": "image", "image": payload}
+    # except Exception:
+    #     pass
 
 
 def non_streaming_generate(

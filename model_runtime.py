@@ -188,6 +188,7 @@ class ModelRuntime:
         session_dir = getattr(self, "_current_session_dir", self._save_dir)
 
         img_idx, text_idx = 0, 0
+        text_buffer = ""
 
         # ✅ generate() streaming=True 时 yield event dict
         for ev in generate(self.cfg_module, self.model, self.tokenizer,
@@ -200,25 +201,33 @@ class ModelRuntime:
 
             # ---------------- Streaming 文本事件 ----------------
             if ev["type"] == "text":
-                txt = ev["text"][:text_chunk_tokens]
+                txt = ev["text"]#[:text_chunk_tokens]
                 yield {"type": "text", "text": txt}
+                text_buffer += txt
 
-                with open(os.path.join(session_dir, f"gen_text_{text_idx}.txt"),
-                            "w", encoding="utf-8") as f:
-                    f.write(txt)
-                text_idx += 1
+                if self.cfg_module.special_tokens['EOC'] in text_buffer:
+                    with open(os.path.join(session_dir, f"gen_text_{text_idx}.txt"),
+                                "w", encoding="utf-8") as f:
+                        f.write(text_buffer)
+                    text_idx += 1
+                    text_buffer = ""
 
             # ---------------- Streaming 图片事件 ----------------
             elif ev["type"] == "image":
+                image_token_str = ev["image"]
+                mm_out = multimodal_decode(image_token_str, self.tokenizer, self.vq_model)
+                import pdb; pdb.set_trace()
+                assert len(mm_out) == 1 and "image" in mm_out[0]
+                image = mm_out[0][-1]
                 img_path = os.path.join(session_dir, f"gen_img_{img_idx}.png")
-                ev["image"].save(img_path)
+                image.save(img_path)
                 img_idx += 1
 
                 yield {"type": "image", "paths": [img_path]}
 
-            # ---------------- 最终 token ids （保留原逻辑） ----------------
-            elif ev["type"] == "final_ids":
-                pass  # 不做 UI 显示，仅保留事件
+            # # ---------------- 最终 token ids （保留原逻辑） ----------------
+            # elif ev["type"] == "final_ids":
+            #     pass  # 不做 UI 显示，仅保留事件
 
     @property
     def save_dir(self): 
