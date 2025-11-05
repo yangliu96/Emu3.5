@@ -34,14 +34,15 @@ def on_submit(text, files, mode, history):
 
     # 3) 先把“用户消息”塞进 Chatbot（tuple 格式）
     if files:
-        history.append(("user", text, [f.name for f in files]))  # 显示用户的文本和上传的文件
+        history.append(("user", text))  # 显示用户的文本
+        history.append(("user", [f.name for f in files]))  # 显示上传的文件
     else:
-        history.append(("user", text, None))  # 如果没有文件，则只显示文本
+        history.append(("user", text))  # 如果没有文件，则只显示文本
     yield history, "", None, history  # 清空输入框/文件
 
     # 4) 占位一条 assistant 消息，后续 streaming 不断覆盖这条
     assistant_acc = ""
-    history.append(("assistant", assistant_acc, None))
+    history.append(("assistant", assistant_acc))
     yield history, "", None, history
 
     # 5) 消费流式事件
@@ -49,15 +50,14 @@ def on_submit(text, files, mode, history):
         if ev["type"] == "text":
             # 如果是文本，继续输出文本
             assistant_acc += ev["text"]
-            history[-1] = ("assistant", assistant_acc, None)
+            history[-1] = ("assistant", assistant_acc)
             yield history, "", None, history
 
         elif ev["type"] == "image":
             # 如果是图片，显示图片
             for ip in ev.get("paths", []):
-                # 复制文件路径并创建新文件
-                echoed = _dup_path(ip)
-                history.append(("assistant", None, [echoed]))  # 将图片路径添加到消息中
+                echoed = _dup_path(ip)  # 复制图片路径以避免重复
+                history.append(("assistant", [echoed]))  # 将图片路径作为内容添加到历史记录中
                 yield history, gr.update(value=None), gr.update(value=None), history
 
 def clear_chat():
