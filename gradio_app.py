@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 import argparse
 import gradio as gr
+import tempfile
+import os
+import shutil
 from model_runtime import ModelRuntime
 
 _RUNTIME = ModelRuntime.instance()
@@ -9,6 +12,14 @@ CSS = """
 .chatbot .message.user { background: #f0fff0 !important; }
 .chatbot .message.assistant { background: #eef2ff !important; }
 """
+
+def _dup_path(src: str) -> str:
+    """复制一个全新文件，避免同一路径在多条消息里复用导致的渲染问题。"""
+    _, ext = os.path.splitext(src)
+    tmp = tempfile.NamedTemporaryFile(suffix=ext or ".png", delete=False)
+    tmp.close()
+    shutil.copyfile(src, tmp.name)
+    return os.path.abspath(tmp.name)
 
 def startup_initialize(cfg_path: str, save_dir: str, device_str: str | None = None):
     return _RUNTIME.initialize(cfg_path=cfg_path, save_dir=save_dir, device_str=device_str)
@@ -43,10 +54,14 @@ def on_submit(text, files, mode, history):
 
         elif ev["type"] == "image":
             # 如果是图片，显示图片
-            img_paths = ev["paths"]
-            # 使用 gr.update() 来更新图片
-            history.append((None, [gr.update(value=img_path) for img_path in img_paths]))  # 在历史记录中添加图片
-            yield history, "", None, history
+            # img_paths = ev["paths"]
+            # # 使用 gr.update() 来更新图片
+            # history.append((None, [gr.update(value=img_path) for img_path in img_paths]))  # 在历史记录中添加图片
+            # yield history, "", None, history
+            for ip in ev.get("paths", []):
+                echoed = _dup_path(ip)
+                history = history + [gr.ChatMessage(role="assistant", content=[echoed])]
+                yield history, gr.update(value=None), gr.update(value=None), history
 
 def clear_chat():
     # 清空后端状态 + 返回两个输出：chat, state
