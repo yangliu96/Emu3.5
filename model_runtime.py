@@ -90,6 +90,7 @@ class ModelRuntime:
             "special_token_ids": cfg.special_token_ids
         }
 
+        save_dir = getattr(cfg, "save_path", save_dir)
         os.makedirs(save_dir, exist_ok=True)
 
         self.cfg_module = cfg
@@ -110,17 +111,32 @@ class ModelRuntime:
         }
 
         cfg_file = config_map.get(mode, "configs/config.py")
-        new_cfg = self._load_cfg_module(cfg_file)
+        cfg = self._load_cfg_module(cfg_file)
 
-        for key in self._sampling_keys:
-            if hasattr(new_cfg, key):
-                setattr(self.cfg_module, key, getattr(new_cfg, key))
+        cfg.special_token_ids = {
+            k: self.tokenizer.convert_tokens_to_ids(v)
+            for k, v in cfg.special_tokens.items()
+        }
 
-        for k, v in self.runtime_persist_cfg.items():
-            setattr(self.cfg_module, k, v)
+        self.runtime_persist_cfg = {
+            "special_token_ids": cfg.special_token_ids
+        }
+        
+        save_dir = getattr(cfg, "save_path", save_dir)
+        os.makedirs(save_dir, exist_ok=True)
 
+        self.cfg_module = cfg
         self.cfg_module.streaming = True
-        print(f"[sampling updated] mode={mode}, model reused ✅")
+        self._save_dir = save_dir
+
+        # for key in self._sampling_keys:
+        #     if hasattr(new_cfg, key):
+        #         setattr(self.cfg_module, key, getattr(new_cfg, key))
+
+        # for k, v in self.runtime_persist_cfg.items():
+        #     setattr(self.cfg_module, k, v)
+
+        print(f"[sampling updated] mode={mode}, model reused ✅, output dir: {save_dir}")
 
 
     # ---------------- control 状态 -----------------
