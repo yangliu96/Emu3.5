@@ -216,7 +216,7 @@ class ModelRuntime:
             elif ev["type"] == "image":
                 image_token_str = ev["image"]
                 mm_out = multimodal_decode(image_token_str, self.tokenizer, self.vq_model)
-                import pdb; pdb.set_trace()
+                # import pdb; pdb.set_trace()
                 assert len(mm_out) == 1 and "image" in mm_out[0]
                 image = mm_out[0][-1]
                 img_path = os.path.join(session_dir, f"gen_img_{img_idx}.png")

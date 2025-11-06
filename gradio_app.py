@@ -123,14 +123,21 @@ def main():
     parser.add_argument("--cfg", type=str, default="configs/config.py")
     parser.add_argument("--save_dir", type=str, default="./outputs")
     parser.add_argument("--device", type=str, default=None)
-    parser.add_argument("--host", type=str, default=None)
-    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--host", type=str, default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=7860)
     args = parser.parse_args()
 
     print(startup_initialize(args.cfg, args.save_dir, args.device))
     ui = build_ui()
     ui.queue()  # 建议开启队列，体验更稳定
-    ui.launch(server_name=args.host, server_port=args.port)
+    ui.launch(
+        server_name=args.host,
+        server_port=args.port,
+        # show_error=True,
+        # prevent_thread_lock=True,
+        # allowed_paths=["."],        # 允许访问生成图片目录
+        # enable_monitoring=False,    # ✅ 禁用 startup-events
+    )
 
 if __name__ == "__main__":
     main()
