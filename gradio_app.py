@@ -80,7 +80,17 @@ def build_ui():
 
         with gr.Row():
             with gr.Column(scale=2):
-                cfg = gr.Textbox(label="🧩 Config Path", value="configs/config.py")
+                # cfg = gr.Textbox(label="🧩 Config Path", value="configs/config.py")
+                cfg = gr.Dropdown(
+                    label="🧩 Config Path",
+                    choices=[
+                        "configs/config.py", 
+                        "configs/example_config_visual_guidance.py", 
+                        "configs/example_config_visual_narrative.py", 
+                        "configs/example_config_t2i.py", 
+                        "configs/example_config_x2i.py"],
+                    value="configs/config.py"
+                )
                 save_dir = gr.Textbox(label="📁 Output Dir", value="./outputs")
                 device = gr.Textbox(label="⚙️ Device", value="")
                 mode = gr.Dropdown(

@@ -122,7 +122,7 @@ class ModelRuntime:
             "special_token_ids": cfg.special_token_ids
         }
         
-        save_dir = getattr(cfg, "save_path", save_dir)
+        save_dir = getattr(cfg, "save_path", self._save_dir)
         os.makedirs(save_dir, exist_ok=True)
 
         self.cfg_module = cfg
