@@ -9,8 +9,31 @@ from model_runtime import ModelRuntime
 _RUNTIME = ModelRuntime.instance()
 
 CSS = """
-.chatbot .message.user { background: #f0fff0 !important; }
-.chatbot .message.assistant { background: #eef2ff !important; }
+/* 整个聊天区域 */
+.chatbot {
+    max-height: 540px;
+}
+
+/* user 消息靠右显示 */
+.chatbot .message.user {
+    background: #dff7e6 !important;
+    margin-left: auto !important;
+    text-align: right !important;
+    border-radius: 12px 12px 2px 12px !important;
+}
+
+/* assistant 消息靠左显示 */
+.chatbot .message.assistant {
+    background: #eef2ff !important;
+    margin-right: auto !important;
+    text-align: left !important;
+    border-radius: 12px 12px 12px 2px !important;
+}
+
+/* 去掉 user / assistant label */
+.chatbot .message .label {
+    display: none !important;
+}
 """
 
 def _dup_path(src: str) -> str:
@@ -25,44 +48,39 @@ def startup_initialize(cfg_path: str, save_dir: str, device_str: str | None = No
     return _RUNTIME.initialize(cfg_path=cfg_path, save_dir=save_dir, device_str=device_str)
 
 def on_submit(text, files, mode, history):
-    # 1) 更新采样配置
     _RUNTIME.update_sampling_config(mode)
 
-    # 2) 设置样本（文本+图片路径）
     sample = {"text": text, "images": [f.name for f in files] if files else []}
     _RUNTIME.encode_and_set_prompt(sample)
 
-    # 3) 先把“用户消息”塞进 Chatbot（tuple 格式）
+    # 用户消息
     if files:
-        history.append(("user", text))  # 显示用户的文本
-        history.append(("user", [f.name for f in files]))  # 显示上传的文件
+        history.append({"role": "user", "content": text})
+        history.append({"role": "user", "content": [f.name for f in files]})
     else:
-        history.append(("user", text))  # 如果没有文件，则只显示文本
-    yield history, "", None, history  # 清空输入框/文件
-
-    # 4) 占位一条 assistant 消息，后续 streaming 不断覆盖这条
-    assistant_acc = ""
-    history.append(("assistant", assistant_acc))
+        history.append({"role": "user", "content": text})
     yield history, "", None, history
 
-    # 5) 消费流式事件
+    # 占位 assistant 消息
+    assistant_acc = ""
+    history.append({"role": "assistant", "content": assistant_acc})
+    yield history, "", None, history
+
+    # Streaming
     for ev in _RUNTIME.stream_events(text_chunk_tokens=64):
         if ev["type"] == "text":
-            # 如果是文本，继续拼接之前的文本
             assistant_acc += ev["text"]
-            history[-1] = ("assistant", assistant_acc)
+            history[-1] = {"role": "assistant", "content": assistant_acc}
             yield history, "", None, history
 
         elif ev["type"] == "image":
-            # 如果是图片，清空之前的文本，并开始新的文本生成
             for ip in ev.get("paths", []):
-                echoed = _dup_path(ip)  # 复制图片路径以避免重复
-                history.append(("assistant", [echoed]))  # 将图片路径作为内容添加到历史记录中
+                echoed = _dup_path(ip)
+                history.append({"role": "assistant", "content": [echoed]})
                 yield history, gr.update(value=None), gr.update(value=None), history
-            
-            assistant_acc = ""  # 清空文本
-            history.append(("assistant", assistant_acc))
 
+            assistant_acc = ""
+            history.append({"role": "assistant", "content": assistant_acc})
 
 def clear_chat():
     # 清空后端状态 + 返回两个输出：chat, state
@@ -79,7 +97,7 @@ def build_ui():
         gr.Markdown("# 🦄 Emu 3.5-Interleave Gradio Demo")
 
         with gr.Row():
-            with gr.Column(scale=2):
+            # with gr.Column(scale=2):
                 # cfg = gr.Dropdown(
                 #     label="🧩 Config Path",
                 #     choices=[
@@ -88,20 +106,31 @@ def build_ui():
                 #     ],
                 #     value="configs/example_config_visual_guidance.py"
                 # )
-                save_dir = gr.Textbox(label="📁 Output Dir", value="./outputs")
+                # save_dir = gr.Textbox(label="📁 Output Dir", value="./outputs")
                 # device = gr.Textbox(label="⚙️ Device", value="")
+                # mode = gr.Dropdown(
+                #     label="Generation Mode",
+                #     choices=["howto", "story",],
+                #     value="howto"
+                # )
+                # init_btn = gr.Button("🚀 Load Model", variant="primary")
+                # status = gr.Markdown("")  # ⬅️ 停止按钮把文案写到这里
+
+            with gr.Column(scale=6):
+                # ⚠️ 使用默认的 tuple 模式（不要设置 type="messages"）
+                chat = gr.Chatbot(
+                    label="Chat",
+                    height=540,
+                    elem_classes="chatbot",
+                    type="messages"  # ✅ 让它识别 ('user', text) / ('assistant', text)
+                )
+                state = gr.State([])
+
                 mode = gr.Dropdown(
                     label="Generation Mode",
                     choices=["howto", "story",],
                     value="howto"
                 )
-                # init_btn = gr.Button("🚀 Load Model", variant="primary")
-                status = gr.Markdown("")  # ⬅️ 停止按钮把文案写到这里
-
-            with gr.Column(scale=6):
-                # ⚠️ 使用默认的 tuple 模式（不要设置 type="messages"）
-                chat = gr.Chatbot(label="Chat", height=540, elem_classes="chatbot")
-                state = gr.State([])
 
                 text = gr.Textbox(label="💬 Prompt", placeholder="Enter your prompt...", lines=2)
                 files = gr.Files(label="📷 Upload image(s)", file_count="multiple", type="filepath")
@@ -110,6 +139,8 @@ def build_ui():
                     send = gr.Button("Send", variant="primary")
                     stop = gr.Button("Stop")
                     clear = gr.Button("Clear")
+                
+                status = gr.Markdown("")  # ⬅️ 停止按钮把文案写到这里
 
         # 绑定
         # init_btn.click(startup_initialize, [cfg, save_dir, device], [status])
