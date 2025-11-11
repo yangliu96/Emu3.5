@@ -144,7 +144,7 @@ def on_stop():
 
 def build_ui():
     with gr.Blocks(css=CSS) as demo:
-        gr.Markdown("# 🦄 Emu 3.5-Image Gradio Demo")
+        gr.Markdown("# Emu 3.5-Image Gradio Demo")
 
         with gr.Row():
             with gr.Column(scale=6):
