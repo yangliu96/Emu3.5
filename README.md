@@ -78,6 +78,7 @@ Edit `configs/config.py` to set:
 - Task template: `task_type in {t2i, x2i, howto, story, explore, vla}`
 - Input image: `use_image` (True to provide reference images, controls <|IMAGE|> token); set `reference_image` in each prompt to specify the image path. For x2i task, we recommand using `reference_image` as a list containing single/multiple image paths to be compatible with multi-image input.
 - Sampling: `sampling_params` (classifier_free_guidance, temperature, top_k/top_p, etc.)
+- Aspect Ratio (for t2i task): `aspect_ratio` ("4:3", "21:9", "1:1", "auto" etc..)
 
 ### Run Inference
 
@@ -118,6 +119,23 @@ To visualize generated protobuf files (--video: Generate video visualizations fo
 ```bash
 python src/utils/vis_proto.py --input <input_proto_file> --output <output_dir> [--video]
 ```
+
+Expected output directory layout (example):
+
+```text
+results/
+├── 000_question.txt
+├── 000_global_cot.txt
+├── 001_text.txt
+├── 001_00_image.png
+├── 001_00_image_cot.txt
+├── 002_text.txt
+├── 002_00_image.png
+├── ...
+└── video.mp4              # only when --video is enabled
+```
+
+Each `*_text.txt` stores decoded segments, `*_image.png` stores generated frames, and matching `*_image_cot.txt` keeps image-level chain-of-thought notes when available.
 
 ## 3. Schedule
 
