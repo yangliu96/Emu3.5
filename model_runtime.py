@@ -101,7 +101,7 @@ class ModelRuntime:
         return f"✅ 模型已加载到 {device}, 输出目录: {save_dir}"
 
     # ---------------- 切 config 不 reload 模型 -----------------
-    def update_sampling_config(self, mode: str):
+    def update_sampling_config(self, mode: str, target_height: int = None, target_width: int = None):
         config_map = {
             "howto": "configs/example_config_visual_guidance.py",
             "story": "configs/example_config_visual_narrative.py",
@@ -124,6 +124,10 @@ class ModelRuntime:
         
         save_dir = getattr(cfg, "save_path", self._save_dir)
         os.makedirs(save_dir, exist_ok=True)
+
+        if mode == 't2i' and target_height is not None and target_width is not None:
+            cfg.target_height = target_height
+            cfg.target_width = target_width
 
         self.cfg_module = cfg
         self.cfg_module.streaming = True
