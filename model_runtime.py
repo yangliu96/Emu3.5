@@ -218,6 +218,12 @@ class ModelRuntime:
                 img_idx += 1
 
                 yield {"type": "image", "paths": [img_path]}
+            
+            elif ev["type"] == "broken_image":
+                yield {"type": "broken_image", "broken_image": ""}
+            
+            else:
+                pass
 
 
     @property

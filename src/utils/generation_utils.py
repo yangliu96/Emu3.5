@@ -170,6 +170,11 @@ def streaming_generate(
                 else:
                     img_stable, buffer = buffer[:-256], buffer[-256:]
                     image_buffer += img_stable
+                    try:
+                        yield {"type": "broken_image", "image": image_buffer}
+                    except Exception:
+                        pass
+
                     break
             else:
                 mstart = _img_start_re.search(buffer)

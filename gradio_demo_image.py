@@ -93,22 +93,46 @@ def on_submit(text, files, mode, aspect_ratio, history):
     history.append({"role": "assistant", "content": assistant_acc})
     yield history, "", None, history
 
+    gen_image_middle_msg = "Generating image... Please wait."
+    gen_image_middle_msg_time = 0
+
     # Streaming
     for ev in _RUNTIME.stream_events(text_chunk_tokens=64):
         if ev["type"] == "text":
             assistant_acc += ev["text"]
-            assistant_acc.replace("<|extra_101|><|extra_204|>")
+            assistant_acc = assistant_acc.replace("<|extra_101|><|extra_204|>", "")
             history[-1] = {"role": "assistant", "content": assistant_acc}
             yield history, "", None, history
+        
+        elif ev["type"] == "broken_image":
+            if "Generating image... Please wait." not in history[-1]["content"]:
+                history.append({"role": "assistant", "content": gen_image_middle_msg})
+            else:
+                history[-1] = {"role": "assistant", "content": gen_image_middle_msg}
+
+            yield history, "", None, history
+
+            gen_image_middle_msg += '.'
+            gen_image_middle_msg_time += 1
+            if gen_image_middle_msg_time == 6:
+                gen_image_middle_msg = "Generating image... Please wait."
+                gen_image_middle_msg_time = 0
 
         elif ev["type"] == "image":
             for ip in ev.get("paths", []):
                 echoed = _dup_path(ip)
-                history.append({"role": "assistant", "content": [echoed]})
+                if "Generating image... Please wait." not in history[-1]["content"]:
+                    history.append({"role": "assistant", "content": [echoed]})
+                else:
+                    history[-1] = {"role": "assistant", "content": [echoed]}
+                    gen_image_middle_msg = "Generating image... Please wait."
+                    gen_image_middle_msg_time = 0
+                
                 yield history, gr.update(value=None), gr.update(value=None), history
 
             assistant_acc = ""
             history.append({"role": "assistant", "content": assistant_acc})
+
 
 def clear_chat():
     _RUNTIME.history.clear()
