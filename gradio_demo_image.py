@@ -162,7 +162,6 @@ def build_ui():
                 # ========================================================================
 
                 text = gr.Textbox(label="💬 Prompt", placeholder="Enter your prompt...", lines=2)
-                # FIX: 使用 filepath，on_submit 里按路径字符串处理
                 files = gr.Files(label="📷 Upload image(s)", file_count="multiple", type="filepath")
 
                 with gr.Row():
@@ -199,10 +198,6 @@ def main():
     ui.launch(
         server_name=args.host,
         server_port=args.port,
-        # show_error=True,
-        # prevent_thread_lock=True,
-        # allowed_paths=["."],
-        # enable_monitoring=False,
     )
 
 if __name__ == "__main__":
