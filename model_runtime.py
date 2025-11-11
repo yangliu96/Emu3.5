@@ -1,12 +1,5 @@
-# -*- coding: utf-8 -*-
-"""
-ModelRuntime: 控制 Emu3.5 推理生命周期：
-✅ 启动时预加载模型
-✅ 切 config 仅更新生成参数，不 reload 模型
-✅ special_token_ids 等外部注入参数不会丢失
-✅ Streaming 输出文本 / 图片 + Stop 优雅中断
-✅ 保存用户输入与推理结果
-"""
+# Copyright 2025 BAAI. and/or its affiliates.
+# SPDX-License-Identifier: Apache-2.0
 
 import os
 import threading
@@ -18,7 +11,7 @@ import torch
 
 from src.utils.input_utils import build_image
 from src.utils.model_utils import build_emu3p5
-from src.utils.generation_utils_streaming import generate, multimodal_decode   # ✅ 使用修正后的 generate()
+from src.utils.generation_utils_streaming import generate, multimodal_decode
 
 
 class ModelRuntime:
@@ -47,9 +40,8 @@ class ModelRuntime:
         self._save_dir: Optional[str] = None
         self._stop_event = threading.Event()
 
-        self.history: List = []  # [(input_ids, unconditional_ids)]
+        self.history: List = []
 
-    # ---------------- config 动态加载 -----------------
     def _load_cfg_module(self, cfg_path: str):
         import importlib.util
         cfg_path = os.path.abspath(cfg_path)
@@ -58,12 +50,11 @@ class ModelRuntime:
         spec.loader.exec_module(module)
         return module
 
-    # ---------------- 模型初始化（启动时调用） -----------------
     def initialize(self, cfg_path: str, save_dir: str,
                    device_str: Optional[str] = None) -> str:
 
         if self.model is not None:
-            return "✅ 模型已就绪（预加载）"
+            return "✅ The model is ready (pre-loaded)"
 
         cfg = self._load_cfg_module(cfg_path)
 
@@ -98,9 +89,9 @@ class ModelRuntime:
         self._device = device
         self._save_dir = save_dir
 
-        return f"✅ 模型已加载到 {device}, 输出目录: {save_dir}"
+        return f"✅ The model has been loaded onto {device}, and the output directory is: {save_dir}"
 
-    # ---------------- 切 config 不 reload 模型 -----------------
+    # ---------------- Switch to "config" mode without reloading the model. -----------------
     def update_sampling_config(self, mode: str, target_height: int = None, target_width: int = None):
         config_map = {
             "howto": "configs/example_config_visual_guidance.py",
@@ -133,23 +124,12 @@ class ModelRuntime:
         self.cfg_module.streaming = True
         self._save_dir = save_dir
 
-        # for key in self._sampling_keys:
-        #     if hasattr(new_cfg, key):
-        #         setattr(self.cfg_module, key, getattr(new_cfg, key))
-
-        # for k, v in self.runtime_persist_cfg.items():
-        #     setattr(self.cfg_module, k, v)
-
         print(f"[sampling updated] mode={mode}, model reused ✅, output dir: {save_dir}")
 
-
-    # ---------------- control 状态 -----------------
     def request_stop(self): self._stop_event.set()
     def reset_stop(self): self._stop_event.clear()
 
-    # ---------------- prompt encode & save 用户输入 -----------------
     def encode_and_set_prompt(self, sample: Dict[str, Any]):
-        """保存用户输入 + 建立 session 目录"""
 
         input_ids, unconditional_ids = self.encode_prompt(sample)
         self.history = [(input_ids, unconditional_ids)]
@@ -158,12 +138,12 @@ class ModelRuntime:
         os.makedirs(session_dir, exist_ok=True)
         self._current_session_dir = session_dir
 
-        # ✅ 保存用户 text 输入
+        # Save the user's text input
         user_text = sample.get("text", "")
         with open(os.path.join(session_dir, "task.txt"), "w", encoding="utf-8") as f:
             f.write(user_text)
 
-        # ✅ 保存用户 image 输入
+        # Save the user's image input
         for idx, p in enumerate(sample.get("images", [])):
             try:
                 Image.open(p).save(os.path.join(session_dir, f"task_image_{idx}.png"))
@@ -197,31 +177,26 @@ class ModelRuntime:
             self.tokenizer.encode(unc_prompt, return_tensors="pt").to(self._device)
         )
 
-    # ---------------- Streaming：保存模型输出 text & image -----------------
+    # ---------------- Streaming: save model's output text & image -----------------
     def stream_events(self, text_chunk_tokens: int = 64) -> Generator[Dict[str, Any], None, None]:
-        """
-        适配新版 generate():
-            streaming=False → return ndarray
-            streaming=True  → yield {"type": "..."}
-        """
+
         input_ids, unconditional_ids = self.history[-1]
         session_dir = getattr(self, "_current_session_dir", self._save_dir)
 
         img_idx, text_idx = 0, 0
         text_buffer = ""
 
-        # ✅ generate() streaming=True 时 yield event dict
         for ev in generate(self.cfg_module, self.model, self.tokenizer,
                            input_ids, unconditional_ids, None, True):
 
             if self._stop_event.is_set():
-                yield {"type": "text", "text": "🛑 已停止生成"}
+                yield {"type": "text", "text": "🛑 Generation has been stopped."}
                 self.reset_stop()
                 break
 
-            # ---------------- Streaming 文本事件 ----------------
+            # ---------------- Streaming text event ----------------
             if ev["type"] == "text":
-                txt = ev["text"]#[:text_chunk_tokens]
+                txt = ev["text"]
                 yield {"type": "text", "text": txt}
                 text_buffer += txt
 
@@ -232,11 +207,10 @@ class ModelRuntime:
                     text_idx += 1
                     text_buffer = ""
 
-            # ---------------- Streaming 图片事件 ----------------
+            # ---------------- Streaming image event ----------------
             elif ev["type"] == "image":
                 image_token_str = ev["image"]
                 mm_out = multimodal_decode(image_token_str, self.tokenizer, self.vq_model)
-                # import pdb; pdb.set_trace()
                 assert len(mm_out) == 1 and "image" in mm_out[0]
                 image = mm_out[0][-1]
                 img_path = os.path.join(session_dir, f"gen_img_{img_idx}.png")
@@ -245,9 +219,6 @@ class ModelRuntime:
 
                 yield {"type": "image", "paths": [img_path]}
 
-            # # ---------------- 最终 token ids （保留原逻辑） ----------------
-            # elif ev["type"] == "final_ids":
-            #     pass  # 不做 UI 显示，仅保留事件
 
     @property
     def save_dir(self): 

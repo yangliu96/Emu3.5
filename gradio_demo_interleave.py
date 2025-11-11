@@ -1,4 +1,6 @@
-# -*- coding: utf-8 -*-
+# Copyright 2025 BAAI. and/or its affiliates.
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import gradio as gr
 import tempfile
@@ -9,12 +11,10 @@ from model_runtime import ModelRuntime
 _RUNTIME = ModelRuntime.instance()
 
 CSS = """
-/* 整个聊天区域 */
 .chatbot {
     max-height: 540px;
 }
 
-/* user 消息靠右显示 */
 .chatbot .message.user {
     background: #dff7e6 !important;
     margin-left: auto !important;
@@ -22,7 +22,6 @@ CSS = """
     border-radius: 12px 12px 2px 12px !important;
 }
 
-/* assistant 消息靠左显示 */
 .chatbot .message.assistant {
     background: #eef2ff !important;
     margin-right: auto !important;
@@ -30,14 +29,13 @@ CSS = """
     border-radius: 12px 12px 12px 2px !important;
 }
 
-/* 去掉 user / assistant label */
 .chatbot .message .label {
     display: none !important;
 }
 """
 
 def _dup_path(src: str) -> str:
-    """复制一个全新文件，避免同一路径在多条消息里复用导致的渲染问题。"""
+    """Create a new file to avoid rendering issues caused by reusing the same path in multiple messages."""
     _, ext = os.path.splitext(src)
     tmp = tempfile.NamedTemporaryFile(suffix=ext or ".png", delete=False)
     tmp.close()
@@ -53,7 +51,7 @@ def on_submit(text, files, mode, history):
     sample = {"text": text, "images": [f.name for f in files] if files else []}
     _RUNTIME.encode_and_set_prompt(sample)
 
-    # 用户消息
+    # user message
     if files:
         history.append({"role": "user", "content": text})
         history.append({"role": "user", "content": [f.name for f in files]})
@@ -61,7 +59,7 @@ def on_submit(text, files, mode, history):
         history.append({"role": "user", "content": text})
     yield history, "", None, history
 
-    # 占位 assistant 消息
+    # Placeholder assistant message
     assistant_acc = ""
     history.append({"role": "assistant", "content": assistant_acc})
     yield history, "", None, history
@@ -70,6 +68,7 @@ def on_submit(text, files, mode, history):
     for ev in _RUNTIME.stream_events(text_chunk_tokens=64):
         if ev["type"] == "text":
             assistant_acc += ev["text"]
+            assistant_acc.replace("<|extra_101|><|extra_204|>")
             history[-1] = {"role": "assistant", "content": assistant_acc}
             yield history, "", None, history
 
@@ -88,7 +87,7 @@ def clear_chat():
 
 def on_stop():
     _RUNTIME.request_stop()
-    return "🛑 已发送停止信号（本轮生成将尽快结束显示）"
+    return "🛑 The stop signal has been sent (this round of generation will end and the display will be completed as soon as possible)"
 
 def build_ui():
     with gr.Blocks(css=CSS) as demo:

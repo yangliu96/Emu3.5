@@ -1,4 +1,6 @@
-# -*- coding: utf-8 -*-
+# Copyright 2025 BAAI. and/or its affiliates.
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import gradio as gr
 import tempfile
@@ -9,12 +11,10 @@ from model_runtime import ModelRuntime
 _RUNTIME = ModelRuntime.instance()
 
 CSS = """
-/* 整个聊天区域 */
 .chatbot {
     max-height: 540px;
 }
 
-/* user 消息靠右显示 */
 .chatbot .message.user {
     background: #dff7e6 !important;
     margin-left: auto !important;
@@ -22,7 +22,6 @@ CSS = """
     border-radius: 12px 12px 2px 12px !important;
 }
 
-/* assistant 消息靠左显示 */
 .chatbot .message.assistant {
     background: #eef2ff !important;
     margin-right: auto !important;
@@ -30,13 +29,12 @@ CSS = """
     border-radius: 12px 12px 12px 2px !important;
 }
 
-/* 去掉 user / assistant label */
 .chatbot .message .label {
     display: none !important;
 }
 """
 
-# ===================== NEW: 纵横比映射与解析 =====================
+# Aspect ratio mapping and analysis
 aspect_ratios = {
     "4:3": "55*73",
     "21:9": "41*97",
@@ -55,10 +53,9 @@ def get_target_size(aspect_ratio: str):
         return None, None
     h, w = map(int, value.split("*"))
     return h, w
-# ================================================================
 
 def _dup_path(src: str) -> str:
-    """复制一个全新文件，避免同一路径在多条消息里复用导致的渲染问题。"""
+    """Create a new file to avoid rendering issues caused by reusing the same path in multiple messages."""
     _, ext = os.path.splitext(src)
     tmp = tempfile.NamedTemporaryFile(suffix=ext or ".png", delete=False)
     tmp.close()
@@ -68,27 +65,22 @@ def _dup_path(src: str) -> str:
 def startup_initialize(cfg_path: str, save_dir: str, device_str: str | None = None):
     return _RUNTIME.initialize(cfg_path=cfg_path, save_dir=save_dir, device_str=device_str)
 
-# ===================== MOD: 增加 aspect_ratio / target_size 传入 =====================
 def on_submit(text, files, mode, aspect_ratio, history):
-    # 计算目标尺寸（仅 t2i 生效；x2i 传 None）
-
+    # Calculate the target size (only effective for t2i; x2i passes None)
     tgt_h, tgt_w = (get_target_size(aspect_ratio) if mode == "t2i" else (None, None))
-    _RUNTIME.update_sampling_config(mode=mode, target_height=tgt_h, target_width=tgt_w)  # 可能被忽略
+    _RUNTIME.update_sampling_config(mode=mode, target_height=tgt_h, target_width=tgt_w)
 
-
-    # FIX: gr.Files(..., type="filepath") 返回的是路径字符串列表，不是对象；不要用 f.name
     image_paths = files or []
 
-    # 把尺寸也一并塞进 sample，便于后端 encode 时读取（若后端暂时不用，也没关系）
     sample = {
         "text": text,
-        "images": image_paths,            # FIX: 直接用路径字符串
-        "target_size": (tgt_h, tgt_w),    # NEW: 传入尺寸
-        "aspect_ratio": aspect_ratio,     # NEW: 记录所选纵横比
+        "images": image_paths,
+        "target_size": (tgt_h, tgt_w),
+        "aspect_ratio": aspect_ratio,
     }
     _RUNTIME.encode_and_set_prompt(sample)
 
-    # 用户消息
+    # user message
     if image_paths:
         history.append({"role": "user", "content": text})
         history.append({"role": "user", "content": image_paths})
@@ -96,7 +88,7 @@ def on_submit(text, files, mode, aspect_ratio, history):
         history.append({"role": "user", "content": text})
     yield history, "", None, history
 
-    # 占位 assistant 消息
+    # Placeholder assistant message
     assistant_acc = ""
     history.append({"role": "assistant", "content": assistant_acc})
     yield history, "", None, history
@@ -105,6 +97,7 @@ def on_submit(text, files, mode, aspect_ratio, history):
     for ev in _RUNTIME.stream_events(text_chunk_tokens=64):
         if ev["type"] == "text":
             assistant_acc += ev["text"]
+            assistant_acc.replace("<|extra_101|><|extra_204|>")
             history[-1] = {"role": "assistant", "content": assistant_acc}
             yield history, "", None, history
 
@@ -116,7 +109,6 @@ def on_submit(text, files, mode, aspect_ratio, history):
 
             assistant_acc = ""
             history.append({"role": "assistant", "content": assistant_acc})
-# =================================================================
 
 def clear_chat():
     _RUNTIME.history.clear()
@@ -124,7 +116,7 @@ def clear_chat():
 
 def on_stop():
     _RUNTIME.request_stop()
-    return "🛑 已发送停止信号（本轮生成将尽快结束显示）"
+    return "🛑 The stop signal has been sent (this round of generation will end and the display will be completed as soon as possible)"
 
 def build_ui():
     with gr.Blocks(css=CSS) as demo:
@@ -146,20 +138,17 @@ def build_ui():
                     value="t2i"
                 )
 
-                # ===================== NEW: 纵横比选项（仅 t2i 使用） =====================
                 aspect_ratio = gr.Dropdown(
                     label="Aspect Ratio (T2I)",
                     choices=list(aspect_ratios.keys()),
                     value="auto",
                     interactive=True,
-                    visible=True,  # 初始 value 为 t2i，因此可见
+                    visible=True,
                 )
 
-                # 根据 mode 切换纵横比控件显隐
                 def _toggle_ar(m):
                     return gr.update(visible=(m == "t2i"))
                 mode.change(_toggle_ar, inputs=[mode], outputs=[aspect_ratio])
-                # ========================================================================
 
                 text = gr.Textbox(label="💬 Prompt", placeholder="Enter your prompt...", lines=2)
                 files = gr.Files(label="📷 Upload image(s)", file_count="multiple", type="filepath")
@@ -171,10 +160,9 @@ def build_ui():
                 
                 status = gr.Markdown("")
 
-        # 绑定：把 aspect_ratio 也作为输入传入 on_submit
         send.click(
             on_submit,
-            inputs=[text, files, mode, aspect_ratio, state],   # NEW: 多了 aspect_ratio
+            inputs=[text, files, mode, aspect_ratio, state],
             outputs=[chat, text, files, state]
         )
 
